@@ -10,47 +10,78 @@
 
 int main(int argc, char *argv[]) {
     if (argc < 4) {
-        write(2, "Uso: ./runner -e <user_id> <comando>\n", 37);
+        char *usage = "Uso: ./runner -e <user_id> <comando>\n";
+        write(2, usage, 37);
         return 1;
     }
 
     Msg m;
     m.runner_pid = getpid();
-    m.type = 1; // Executar
+    m.type = 1; 
     m.user_id = atoi(argv[2]);
+    // Copiar o comando garantindo que termina em \0
+    memset(m.command, 0, sizeof(m.command));
     strncpy(m.command, argv[3], sizeof(m.command) - 1);
 
-    // 1. Criar FIFO privado para receber resposta
+    char out_buf[512];
     char meu_fifo[64];
     snprintf(meu_fifo, sizeof(meu_fifo), "tmp/fifo_%d", m.runner_pid);
     mkfifo(meu_fifo, 0666);
 
-    // 2. Enviar pedido ao Controller
+    // 1. Enviar Pedido ao Controller
     int fd_c = open("tmp/controller_pipe", O_WRONLY);
-    if (fd_c == -1) { perror("Controller off"); return 1; }
+    if (fd_c == -1) { write(2, "Erro: Controller nao esta ativo\n", 32); return 1; }
     write(fd_c, &m, sizeof(Msg));
     close(fd_c);
-    write(1, "[runner] command submitted\n", 27);
 
-    // 3. Esperar pelo "OK" do Controller
+    int n1 = snprintf(out_buf, sizeof(out_buf), "[runner] command %d submitted\n", m.runner_pid);
+    write(1, out_buf, n1);
+
+    // 2. Esperar autorização (Bloqueia no read)
     int fd_r = open(meu_fifo, O_RDONLY);
-    int autorizacao;
-    read(fd_r, &autorizacao, sizeof(int)); // Bloqueia aqui!
+    int ok;
+    read(fd_r, &ok, sizeof(int));
     close(fd_r);
 
-    write(1, "[runner] executing command...\n", 30);
+    int n2 = snprintf(out_buf, sizeof(out_buf), "[runner] executing command %d...\n", m.runner_pid);
+    write(1, out_buf, n2);
 
-    // 4. EXECUÇÃO REAL (Fork + Exec)
-    if (fork() == 0) {
-        // Divide o comando por espaços (simplificado para o teste)
-        char *args[] = {m.command, NULL}; 
-        execvp(args[0], args);
-        perror("Erro no exec");
-        exit(1);
+    // 3. Execução REAL (Onde o sleep 5 acontece)
+    pid_t pid = fork();
+    if (pid == 0) {
+        char *args[16];
+        int i = 0;
+        
+        // Parsing robusto: corta por espaços, tabs ou novas linhas
+        char *token = strtok(m.command, " \t\n");
+        while (token != NULL && i < 15) {
+            args[i++] = token;
+            token = strtok(NULL, " \t\n");
+        }
+        args[i] = NULL;
+
+        if (args[0] != NULL) {
+            execvp(args[0], args);
+            // Se o execvp falhar, ele escreve o erro
+            perror("execvp"); 
+        }
+        _exit(1); 
     }
-    wait(NULL); // Espera o comando terminar
+    
+    // O PAI ESPERA O FILHO (Aqui é que o tempo passa)
+    waitpid(pid, NULL, 0);
 
-    write(1, "[runner] command finished\n", 26);
-    unlink(meu_fifo); // Limpa o seu próprio FIFO
+    // 4. Notificar Término ao Controller
+    m.type = 4;
+    fd_c = open("tmp/controller_pipe", O_WRONLY);
+    if (fd_c != -1) {
+        write(fd_c, &m, sizeof(Msg));
+        close(fd_c);
+    }
+
+    int n3 = snprintf(out_buf, sizeof(out_buf), "[runner] command %d finished\n", m.runner_pid);
+    write(1, out_buf, n3);
+
+    unlink(meu_fifo);
     return 0;
 }
