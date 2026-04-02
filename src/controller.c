@@ -18,67 +18,136 @@ int main(int argc, char *argv[]) {
 
     int max_parallel = atoi(argv[1]);
     int running_now = 0;
-    
-    // Fila de espera simples
+
     Msg queue[MAX_QUEUE];
     int queue_count = 0;
 
     mkfifo("tmp/controller_pipe", 0666);
-    int fd_c = open("tmp/controller_pipe", O_RDONLY);
+
+    int fd_c = open("tmp/controller_pipe", O_RDWR);
 
     Msg m;
     char buffer[512];
 
-    while (read(fd_c, &m, sizeof(Msg)) > 0) {
-        if (m.type == 1) { // NOVO PEDIDO
+    int running = 1;
+
+    while (running && read(fd_c, &m, sizeof(Msg)) > 0) {
+
+        // -e: novo pedido
+        if (m.type == 1) {
+
             if (running_now < max_parallel) {
-                // HÁ VAGA: Autoriza logo
+
                 char fifo_res[64];
                 snprintf(fifo_res, sizeof(fifo_res), "tmp/fifo_%d", m.runner_pid);
+
                 int fd_res = open(fifo_res, O_WRONLY);
                 if (fd_res != -1) {
                     int ok = 1;
                     write(fd_res, &ok, sizeof(int));
                     close(fd_res);
+
                     running_now++;
-                    
-                    int n = snprintf(buffer, sizeof(buffer), "[controller] %d a correr. Autorizei PID %d\n", running_now, m.runner_pid);
+
+                    int n = snprintf(buffer, sizeof(buffer),
+                        "[controller] PID %d a correr\n", m.runner_pid);
                     write(1, buffer, n);
                 }
+
             } else {
-                // CHEIO: Vai para a fila
+
                 if (queue_count < MAX_QUEUE) {
                     queue[queue_count++] = m;
-                    int n = snprintf(buffer, sizeof(buffer), "[controller] Cheio! PID %d em espera (Posicao %d)\n", m.runner_pid, queue_count);
+
+                    int n = snprintf(buffer, sizeof(buffer),
+                        "[controller] cheio -> PID %d em fila (%d)\n",
+                        m.runner_pid, queue_count);
                     write(1, buffer, n);
                 }
             }
-        } 
-        else if (m.type == 4) { // COMANDO TERMINOU
+        }
+
+        // -e: terminou
+        else if (m.type == 4) {
+
             running_now--;
-            int n = snprintf(buffer, sizeof(buffer), "[controller] PID %d terminou. Vagas: %d\n", m.runner_pid, max_parallel - running_now);
+
+            int n = snprintf(buffer, sizeof(buffer),
+                "[controller] PID %d terminou | vagas: %d\n",
+                m.runner_pid, max_parallel - running_now);
             write(1, buffer, n);
 
-            // Se houver alguém na fila, autoriza o próximo!
             if (queue_count > 0) {
+
                 Msg next = queue[0];
-                // Chegar a fila para a frente (shift)
-                for(int i=0; i < queue_count-1; i++) queue[i] = queue[i+1];
+
+                for (int i = 0; i < queue_count - 1; i++) {
+                    queue[i] = queue[i + 1];
+                }
+
                 queue_count--;
 
                 char fifo_res[64];
                 snprintf(fifo_res, sizeof(fifo_res), "tmp/fifo_%d", next.runner_pid);
+
                 int fd_res = open(fifo_res, O_WRONLY);
                 if (fd_res != -1) {
                     int ok = 1;
                     write(fd_res, &ok, sizeof(int));
                     close(fd_res);
+
                     running_now++;
-                    int n2 = snprintf(buffer, sizeof(buffer), "[controller] Fila andou! Autorizei PID %d\n", next.runner_pid);
+
+                    int n2 = snprintf(buffer, sizeof(buffer),
+                        "[controller] fila avançou -> PID %d autorizado\n",
+                        next.runner_pid);
                     write(1, buffer, n2);
                 }
             }
         }
+
+        // -c: consulta
+        else if (m.type == 2) {
+
+            char fifo_res[64];
+            snprintf(fifo_res, sizeof(fifo_res), "tmp/fifo_%d", m.runner_pid);
+
+            int fd_res = open(fifo_res, O_WRONLY);
+            if (fd_res != -1) {
+
+                char out[1024];
+                int len = 0;
+
+                len += snprintf(out + len, sizeof(out) - len,
+                    "=== ESTADO CONTROLLER ===\n");
+
+                len += snprintf(out + len, sizeof(out) - len,
+                    "A correr: %d / %d\n", running_now, max_parallel);
+
+                len += snprintf(out + len, sizeof(out) - len,
+                    "Em fila: %d\n", queue_count);
+
+                for (int i = 0; i < queue_count; i++) {
+                    len += snprintf(out + len, sizeof(out) - len,
+                        "PID em fila: %d\n", queue[i].runner_pid);
+                }
+
+                write(fd_res, out, strlen(out));
+                close(fd_res);
+            }
+        }
+
+
+        // -s: shutdown
+        else if (m.type == 5) {
+
+            write(1, "[controller] shutdown recebido\n", 32);
+            running = 0;
+        }
     }
+
+    close(fd_c);
+    unlink("tmp/controller_pipe");
+
     return 0;
 }
