@@ -1,0 +1,4 @@
+user 10 | pid 19768 | cmd "sleep 5" | tempo 5.003 s
+user 20 | pid 19789 | cmd "echo 'User 20: Passei a frente devido ao Round-Robin!'" | tempo 4.002 s
+user 10 | pid 19769 | cmd "sleep 5" | tempo 10.007 s
+user 10 | pid 19770 | cmd "sleep 5" | tempo 15.010 s

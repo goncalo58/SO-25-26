@@ -1,11 +1,11 @@
-CC = gcc
-CFLAGS = -Wall -g -Iinclude
+CC      = gcc
+CFLAGS  = -Wall -g -Iinclude
 LDFLAGS =
 
 all: folders controller runner
 
 controller: bin/controller
-runner: bin/runner
+runner:     bin/runner
 
 folders:
 	@mkdir -p src include obj bin tmp
@@ -20,4 +20,4 @@ obj/%.o: src/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f obj/* tmp/* bin/*
+	rm -f obj/* tmp/* bin/* log.txt results_*.txt
