@@ -1,1 +1,0 @@
-ls: cannot access '/caminho_inexistente': No such file or directory
