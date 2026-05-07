@@ -30,7 +30,7 @@ static void authorize(Msg *m) {
     snprintf(fifo_res, sizeof(fifo_res), "tmp/fifo_%d", m->runner_pid);
 
     // abre o canal privado do runner
-    int fd_res = open(fifo_res, O_WRONLY);
+    int fd_res = open(fifo_res, O_WRONLY|O_NONBLOCK);
     if (fd_res == -1) return;
 
     int ok = 1;
