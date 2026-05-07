@@ -1,8 +1,0 @@
-parallel=1 wall_ms=10035
-parallel=2 wall_ms=5022
-parallel=5 wall_ms=2018
-parallel=10 wall_ms=1020
-parallel=1 wall_ms=10051
-parallel=2 wall_ms=5038
-parallel=5 wall_ms=2029
-parallel=10 wall_ms=1022

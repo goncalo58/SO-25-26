@@ -1,7 +1,0 @@
-user 1 | pid 21407 | cmd "sleep 10" | tempo 10.004 s
-user 1 | pid 21408 | cmd "sleep 10" | tempo 10.003 s
-user 2 | pid 21547 | cmd "sleep 5" | tempo 5.003 s
-user 2 | pid 21649 | cmd "sleep 5" | tempo 5.010 s
-user 2 | pid 21650 | cmd "sleep 5" | tempo 5.004 s
-user 2 | pid 21651 | cmd "sleep 5" | tempo 10.004 s
-user 2 | pid 21652 | cmd "sleep 5" | tempo 10.005 s
