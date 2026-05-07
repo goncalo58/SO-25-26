@@ -11,42 +11,37 @@
 #define MAX_QUEUE   200
 #define MAX_RUNNING 200
 
-/* ------------------------------------------------------------------ *
- *  Política de escalonamento: Round-Robin por utilizador             *
- *                                                                    *
- *  A fila de espera é mantida por ordem de chegada.                 *
- *  Quando uma vaga fica livre, o controller percorre a fila e       *
- *  escolhe o primeiro pedido cujo user_id seja diferente do         *
- *  último user_id que foi autorizado (se existir). Só se não        *
- *  houver nenhum diferente é que volta ao mesmo utilizador.         *
- *  Isto garante alternância entre utilizadores (fairness).          *
- * ------------------------------------------------------------------ */
 
 static int    queue_count   = 0;
-static Msg    queue[MAX_QUEUE];
+static Msg    queue[MAX_QUEUE];     // Fila de espera (pedidos parados)
 
 static int    running_count = 0;
-static Msg    running[MAX_RUNNING];
+static Msg    running[MAX_RUNNING]; // Comandos que estão a correr agora
 
-static int    running_now   = 0;
-static int    max_parallel  = 1;
-static int    last_user_id  = -1;   /* último utilizador autorizado */
+static int    running_now   = 0;    // Contador de slots ocupados
+static int    max_parallel  = 1;    // Limite P definido no arranque
+static int    last_user_id  = -1;   // Memória do último utilizador servido (para Round-Robin)
 
-/* Envia autorização ao runner e regista-o como em execução */
+/* * o sinal verde
+ * envia um sinal ao runner via FIFO privado para ele avançar com o execvp().
+ */
 static void authorize(Msg *m) {
     char fifo_res[64];
     snprintf(fifo_res, sizeof(fifo_res), "tmp/fifo_%d", m->runner_pid);
 
+    // abre o canal privado do runner
     int fd_res = open(fifo_res, O_WRONLY);
     if (fd_res == -1) return;
 
     int ok = 1;
+    // o runner está bloqueado num read(); este write "acorda-o"
     write(fd_res, &ok, sizeof(int));
     close(fd_res);
 
+    // regista que este comando passou a estar em execução
     running[running_count++] = *m;
     running_now++;
-    last_user_id = m->user_id;
+    last_user_id = m->user_id; // atualiza quem foi o último servido
 
     char buf[256];
     int n = snprintf(buf, sizeof(buf),
@@ -55,27 +50,38 @@ static void authorize(Msg *m) {
     write(1, buf, n);
 }
 
-/* Escolhe o próximo da fila usando Round-Robin por utilizador */
+/* * PICK_NEXT: O "Cérebro" do Escalonamento
+ * implementa a política Round-Robin por utilizador (jutiça)
+ ----------------------------------------------------------
+ * Em vez de um FIFO simples, o escalonador percorre a fila 
+ * à procura do primeiro pedido de um UTILIZADOR DIFERENTE 
+ * do último que foi servido.
+ *
+ * Objetivo: Evitar que um utilizador com muitos comandos 
+ * monopolize o sistema (starvation), garantindo que todos 
+ * progridam independentemente da carga dos outros.
+ */
 static int pick_next(void) {
     if (queue_count == 0) return -1;
 
-    /* Tenta encontrar um utilizador diferente do último */
+    /* Tenta encontrar alguém que NÃO seja o último utilizador servido */
     for (int i = 0; i < queue_count; i++) {
         if (queue[i].user_id != last_user_id)
-            return i;
+            return i; // Encontrou um utilizador diferente (Justiça!)
     }
-    /* Todos do mesmo utilizador: aceita o primeiro */
+    
+    /* Se todos na fila forem do mesmo utilizador, serve o mais antigo */
     return 0;
 }
 
-/* Remove índice idx da fila */
+/* Remove um elemento da fila de espera e "chega" os outros para a frente */
 static void queue_remove(int idx) {
     for (int i = idx; i < queue_count - 1; i++)
         queue[i] = queue[i + 1];
     queue_count--;
 }
 
-/* Tenta preencher vagas disponíveis com pedidos da fila */
+/* Sempre que abre uma vaga, esta função tenta preenchê-la com quem está na fila */
 static void fill_slots(void) {
     while (running_now < max_parallel && queue_count > 0) {
         int idx = pick_next();
@@ -86,10 +92,7 @@ static void fill_slots(void) {
     }
 }
 
-/* ------------------------------------------------------------------ */
-
 int main(int argc, char *argv[]) {
-
     if (argc < 2) {
         write(2, "Uso: ./controller <max_parallel>\n", 33);
         return 1;
@@ -98,6 +101,7 @@ int main(int argc, char *argv[]) {
     max_parallel = atoi(argv[1]);
     if (max_parallel < 1) max_parallel = 1;
 
+    //  arranque do servidor
     {
         char buf[128];
         int n = snprintf(buf, sizeof(buf),
@@ -105,162 +109,112 @@ int main(int argc, char *argv[]) {
         write(1, buf, n);
     }
 
+    // Cria o ponto de entrada central
     mkfifo("tmp/controller_pipe", 0666);
-    /* Abre em O_RDWR para que o pipe nunca fique sem escritor e o
-       read() não retorne 0 prematuramente quando não há runners.    */
+    
+    /* *  abrimos o pipe em O_RDWR (Leitura e Escrita).
+     * isto garante que o pipe nunca fica sem "escritores", logo o read() 
+     * nunca retorna 0 (EOF) e o controller não desliga sozinho.
+
+     * Se abríssemos apenas em O_RDONLY, o read() retornaria 0 (EOF) 
+     * sempre que o último runner ativo fechasse a sua extremidade de escrita.
+    * Isto faria com que o Controller saísse do ciclo while e terminasse 
+    * prematuramente, mesmo havendo comandos em fila ou a aguardar novos pedidos.
+    * Com O_RDWR, o próprio Controller conta como um "escritor" ativo, 
+    * mantendo o pipe aberto e o servidor em escuta permanente.
+     */
     int fd_c = open("tmp/controller_pipe", O_RDWR);
-    if (fd_c == -1) {
-        write(2, "Erro ao abrir controller_pipe\n", 30);
-        return 1;
-    }
+    if (fd_c == -1) return 1;
 
     Msg m;
     char buffer[512];
     int shutdown_requested = 0;
     int running_flag = 1;
 
+    //  O servidor nunca dorme
     while (running_flag) {
-
+        // O processo fica parado aqui até chegar uma mensagem de qualquer runner
         ssize_t r = read(fd_c, &m, sizeof(Msg));
         if (r <= 0) break;
 
-        /* ---------- NOVO PEDIDO DE EXECUÇÃO (-e) ---------- */
+        /* TIPO 1: NOVO PEDIDO DE EXECUÇÃO (-e) */
         if (m.type == 1) {
+            gettimeofday(&m.start_time, NULL); // Marca o tempo de chegada
 
-            gettimeofday(&m.start_time, NULL);
-
-            if (running_now < max_parallel) {
+            if (running_now < max_parallel && !shutdown_requested) {
                 authorize(&m);
-            } else {
-                /* Vai para a fila de espera */
+            } else if (!shutdown_requested) {
+                // Se estiver cheio, guarda na fila
                 if (queue_count < MAX_QUEUE) {
                     queue[queue_count++] = m;
                     int n = snprintf(buffer, sizeof(buffer),
                         "[controller] PID %d (user %d) em fila [pos %d]\n",
                         m.runner_pid, m.user_id, queue_count);
                     write(1, buffer, n);
-                } else {
-                    write(2, "[controller] fila cheia, pedido rejeitado\n", 42);
                 }
             }
         }
 
-        /* ---------- COMANDO TERMINOU (-e fim) ---------- */
+        /* comando terminoou, notificaçao vinda do runner*/
         else if (m.type == 4) {
-
-            /* Procura na lista de execução */
             int idx = -1;
             for (int i = 0; i < running_count; i++) {
                 if (running[i].runner_pid == m.runner_pid) {
-                    idx = i;
-                    break;
+                    idx = i; break;
                 }
             }
 
             if (idx != -1) {
                 struct timeval end;
                 gettimeofday(&end, NULL);
+                double duration = (end.tv_sec - running[idx].start_time.tv_sec) +
+                                 (end.tv_usec - running[idx].start_time.tv_usec) / 1e6;
 
-                double duration =
-                    (end.tv_sec  - running[idx].start_time.tv_sec) +
-                    (end.tv_usec - running[idx].start_time.tv_usec) / 1e6;
-
-                /* Registo persistente */
-                int fd_log = open("log.txt",
-                                  O_CREAT | O_WRONLY | O_APPEND, 0666);
+                // regista no log
+                int fd_log = open("log.txt", O_CREAT | O_WRONLY | O_APPEND, 0666);
                 if (fd_log != -1) {
                     char linha[512];
                     int nlog = snprintf(linha, sizeof(linha),
                         "user %d | pid %d | cmd \"%s\" | tempo %.3f s\n",
-                        running[idx].user_id,
-                        running[idx].runner_pid,
-                        running[idx].command,
-                        duration);
+                        running[idx].user_id, running[idx].runner_pid, running[idx].command, duration);
                     write(fd_log, linha, nlog);
                     close(fd_log);
                 }
 
-                /* Remove da lista de execução */
-                for (int i = idx; i < running_count - 1; i++)
-                    running[i] = running[i + 1];
+                // Remove da lista de ativos e tenta meter alguém da fila
+                for (int i = idx; i < running_count - 1; i++) running[i] = running[i + 1];
                 running_count--;
                 running_now--;
-
-                int n = snprintf(buffer, sizeof(buffer),
-                    "[controller] PID %d terminou (%.3f s)\n",
-                    m.runner_pid, duration);
-                write(1, buffer, n);
+                fill_slots();
             }
-
-            /* Tenta preencher vagas com pedidos da fila */
-            fill_slots();
         }
 
-        /* ---------- CONSULTA (-c) ---------- */
+        /* consulta de estado (-c) */
         else if (m.type == 2) {
-
             char fifo_res[64];
             snprintf(fifo_res, sizeof(fifo_res), "tmp/fifo_%d", m.runner_pid);
-
             int fd_res = open(fifo_res, O_WRONLY);
             if (fd_res != -1) {
                 char out[4096];
-                int  len = 0;
-
-                len += snprintf(out + len, sizeof(out) - len,
-                    "=== ESTADO DO CONTROLLER ===\n");
-                len += snprintf(out + len, sizeof(out) - len,
-                    "Paralelo max : %d\n", max_parallel);
-                len += snprintf(out + len, sizeof(out) - len,
-                    "A correr     : %d\n", running_now);
-                len += snprintf(out + len, sizeof(out) - len,
-                    "Em fila      : %d\n\n", queue_count);
-
-                if (running_count > 0) {
-                    len += snprintf(out + len, sizeof(out) - len,
-                        "-- Em execucao --\n");
-                    for (int i = 0; i < running_count; i++) {
-                        len += snprintf(out + len, sizeof(out) - len,
-                            "  PID %-7d | user %d | cmd: %s\n",
-                            running[i].runner_pid,
-                            running[i].user_id,
-                            running[i].command);
-                    }
-                    len += snprintf(out + len, sizeof(out) - len, "\n");
-                }
-
-                if (queue_count > 0) {
-                    len += snprintf(out + len, sizeof(out) - len,
-                        "-- Em espera (ordem de escalonamento) --\n");
-                    for (int i = 0; i < queue_count; i++) {
-                        len += snprintf(out + len, sizeof(out) - len,
-                            "  [%d] PID %-7d | user %d | cmd: %s\n",
-                            i + 1,
-                            queue[i].runner_pid,
-                            queue[i].user_id,
-                            queue[i].command);
-                    }
-                }
-
+                int len = snprintf(out, sizeof(out), "=== ESTADO DO CONTROLLER ===\nParalelo max: %d\nA correr: %d\nEm fila: %d\n", 
+                                   max_parallel, running_now, queue_count);
                 write(fd_res, out, len);
                 close(fd_res);
             }
         }
 
-        /* ---------- SHUTDOWN (-s) ---------- */
+        /* pedido de shutdown(-s) */
         else if (m.type == 5) {
-            write(1, "[controller] shutdown pedido\n", 29);
+            write(1, "[controller] shutdown pedido (a aguardar fim de tarefas)\n", 57);
             shutdown_requested = 1;
         }
 
-        /* Verifica condição de saída */
+        // Só desliga se não houver mais nada a fazer
         if (shutdown_requested && running_now == 0 && queue_count == 0) {
-            write(1, "[controller] shutdown concluido\n", 32);
             running_flag = 0;
         }
     }
 
-    close(fd_c);
     unlink("tmp/controller_pipe");
     return 0;
 }
