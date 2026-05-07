@@ -21,16 +21,21 @@ typedef struct {
 } Cmd;
 
 /* * PARSE_PIPELINE: Transforma a string do utilizador em estruturas Cmd.
- * 1. Divide a linha por '|' para identificar os estágios da pipeline.
+ * 1. Divide a linha por '|' para identificar os estágios da pipeline. (ver quais comandos fazem parte dos argumaentos que o utilziador escreveu)
  * 2. Para cada estágio, identifica os símbolos de redirecionamento.
  */
 static int parse_pipeline(char *line, Cmd cmds[MAX_CMDS]) {
     int ncmds = 0;
-    char *saveptr1;
-    char *seg = strtok_r(line, "|", &saveptr1); // Divide pelos Pipes
+    char *saveptr1; //guarda o endereço de memoria de onde a funçao parou de ler a string original
+    char *seg = strtok_r(line, "|", &saveptr1); // Divide pelos Pipes, devolvle o ponteiro para o 
+    //proximo pedaço da string
 
     while (seg && ncmds < MAX_CMDS) {
-        Cmd *c = &cmds[ncmds++];
+    /*e um ciclo que enquaanto o numero de comandos e o
+     a divisao dos pipes for menor que o numero max de comandos 
+     executa a procura certo
+    */
+        Cmd *c = &cmds[ncmds++]; //guarda os dados do comando atual
         c->nargs = 0; c->redir_in = NULL; c->redir_out = NULL; c->redir_err = NULL;
 
         char *saveptr2;

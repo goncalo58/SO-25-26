@@ -67,7 +67,7 @@ static int pick_next(void) {
     /* Tenta encontrar alguém que NÃO seja o último utilizador servido */
     for (int i = 0; i < queue_count; i++) {
         if (queue[i].user_id != last_user_id)
-            return i; // Encontrou um utilizador diferente (Justiça!)
+            return i; // Encontrou um utilizador diferente (Justiça!), executa o para nao perder tempo
     }
     
     /* Se todos na fila forem do mesmo utilizador, serve o mais antigo */
